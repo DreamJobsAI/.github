@@ -1,0 +1,205 @@
+# ==============================================================================
+# Reusable Docker Build & Push to ECR
+# ==============================================================================
+#
+# Shared CI/CD engine for all DreamJobsAI Python services.
+# Caller repos provide service-specific inputs; this workflow handles:
+#   1. Auto-incrementing version tags (v1-dev, v2-staging, v3, ...)
+#   2. OIDC authentication to AWS
+#   3. Multi-stage Docker build with layer caching
+#   4. Push to ECR with versioned + rolling tags
+#   5. Git tag creation for traceability
+#
+# USAGE (in caller repo .github/workflows/docker-ci.yml):
+#   jobs:
+#     build:
+#       uses: DreamJobsAI/.github/.github/workflows/docker-build.yml@main
+#       with:
+#         service_name: "my-service"
+#         aws_account_id: "371238580923"
+#         ecr_repository: "dreamjobs-ai/my-service"
+#       secrets:
+#         AWS_ROLE_ARN: ${{ secrets.AWS_ECR_ROLE_ARN }}
+#
+# ==============================================================================
+
+name: Docker Build & Push to ECR
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: "Service name (for logging and step summary)"
+        required: true
+        type: string
+      aws_account_id:
+        description: "AWS account ID"
+        required: true
+        type: string
+      aws_region:
+        description: "AWS region for ECR"
+        required: false
+        type: string
+        default: "eu-central-1"
+      ecr_repository:
+        description: "ECR repository name (e.g., dreamjobs-ai/ai-gateway)"
+        required: true
+        type: string
+      dockerfile:
+        description: "Path to Dockerfile relative to repo root"
+        required: false
+        type: string
+        default: "./Dockerfile"
+      build_context:
+        description: "Docker build context path"
+        required: false
+        type: string
+        default: "."
+    secrets:
+      AWS_ROLE_ARN:
+        description: "IAM role ARN for OIDC-based ECR push"
+        required: true
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  build-and-push:
+    name: "Build ${{ inputs.service_name }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    concurrency:
+      group: docker-${{ github.repository }}-${{ github.ref_name }}
+      cancel-in-progress: false
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout with full history (needed for tag-based version detection)
+      # -----------------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # -----------------------------------------------------------------------
+      # 2. Compute the next version tag based on existing git tags
+      #
+      #    Branch mapping:
+      #      dev     → v{N}-dev     + latest-dev
+      #      staging → v{N}-staging + latest-staging
+      #      main    → v{N}         + latest
+      #
+      #    First build on any branch starts at v1.
+      # -----------------------------------------------------------------------
+      - name: Determine version
+        id: version
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+
+          case "${BRANCH}" in
+            dev)     SUFFIX="-dev" ;;
+            staging) SUFFIX="-staging" ;;
+            main)    SUFFIX="" ;;
+            *)
+              echo "::error::Branch '${BRANCH}' is not configured for Docker builds. Only dev, staging, and main are supported."
+              exit 1
+              ;;
+          esac
+
+          git fetch --tags --force
+
+          if [ -z "${SUFFIX}" ]; then
+            LATEST=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+$' | sed 's/^v//' | sort -n | tail -1)
+          else
+            LATEST=$(git tag --list "v[0-9]*${SUFFIX}" | sed "s/^v//; s/${SUFFIX}$//" | sort -n | tail -1)
+          fi
+
+          NEXT_VERSION=$(( ${LATEST:-0} + 1 ))
+          VERSION_TAG="v${NEXT_VERSION}${SUFFIX}"
+
+          if [ -z "${SUFFIX}" ]; then
+            ROLLING_TAG="latest"
+          else
+            ROLLING_TAG="latest${SUFFIX}"
+          fi
+
+          echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
+          echo "rolling_tag=${ROLLING_TAG}" >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+          echo "### Version" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Branch:** \`${BRANCH}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Version tag:** \`${VERSION_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Rolling tag:** \`${ROLLING_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # -----------------------------------------------------------------------
+      # 3. Authenticate to AWS via OIDC (no static credentials)
+      # -----------------------------------------------------------------------
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: gha-ecr-${{ inputs.service_name }}-${{ github.run_id }}
+
+      # -----------------------------------------------------------------------
+      # 4. Login to ECR
+      # -----------------------------------------------------------------------
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # -----------------------------------------------------------------------
+      # 5. Set up Docker Buildx for multi-stage builds + caching
+      # -----------------------------------------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # -----------------------------------------------------------------------
+      # 6. Build and push with GHA layer cache
+      # -----------------------------------------------------------------------
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.build_context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
+            ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.rolling_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      # -----------------------------------------------------------------------
+      # 7. Create git tag (only after successful push to ECR)
+      # -----------------------------------------------------------------------
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.version_tag }}"
+          git push origin "${{ steps.version.outputs.version_tag }}"
+
+      # -----------------------------------------------------------------------
+      # 8. Job summary with all build details
+      # -----------------------------------------------------------------------
+      - name: Build summary
+        if: always()
+        run: |
+          ECR_URL="${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Docker Build Result" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameter | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Service** | \`${{ inputs.service_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Branch** | \`${{ steps.version.outputs.branch }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Version tag** | \`${{ steps.version.outputs.version_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Rolling tag** | \`${{ steps.version.outputs.rolling_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **ECR image** | \`${ECR_URL}:${{ steps.version.outputs.version_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Commit** | [\`${GITHUB_SHA::8}\`](${{ github.server_url }}/${{ github.repository }}/commit/${GITHUB_SHA}) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Triggered by** | @${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"

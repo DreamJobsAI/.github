@@ -1,0 +1,164 @@
+# ==============================================================================
+# Reusable Deploy Workflow — SSM-based deployment to EC2
+# ==============================================================================
+#
+# Deploys a single service to the dev or staging environment on the shared
+# EC2 instance by executing docker compose pull + up via SSM RunShellScript.
+#
+# USAGE (in caller repo .github/workflows/docker-ci.yml):
+#   deploy:
+#     needs: build
+#     if: github.ref_name == 'dev' || github.ref_name == 'staging'
+#     uses: DreamJobsAI/.github/.github/workflows/deploy.yml@main
+#     with:
+#       service_name: "ai-gateway"
+#       environment: ${{ github.ref_name }}
+#     secrets:
+#       AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+#       EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+#
+# ==============================================================================
+
+name: Deploy to EC2
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: "Docker Compose service name (e.g., ai-gateway)"
+        required: true
+        type: string
+      environment:
+        description: "Target environment (dev or staging)"
+        required: true
+        type: string
+      aws_region:
+        description: "AWS region"
+        required: false
+        type: string
+        default: "eu-central-1"
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        description: "IAM role ARN for OIDC-based SSM access"
+        required: true
+      EC2_INSTANCE_ID:
+        description: "Target EC2 instance ID"
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: "Deploy ${{ inputs.service_name }} → ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ${{ inputs.environment }}
+
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Validate environment
+        run: |
+          if [[ "${{ inputs.environment }}" != "dev" && "${{ inputs.environment }}" != "staging" ]]; then
+            echo "::error::Invalid environment '${{ inputs.environment }}'. Only 'dev' and 'staging' are supported."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: gha-deploy-${{ inputs.service_name }}-${{ inputs.environment }}-${{ github.run_id }}
+
+      - name: Deploy via SSM
+        id: ssm
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --timeout-seconds 300 \
+            --comment "Deploy ${{ inputs.service_name }} to ${{ inputs.environment }} (run ${{ github.run_id }})" \
+            --parameters commands='[
+              "set -e",
+              "echo \"=== Deploying ${{ inputs.service_name }} to ${{ inputs.environment }} ===\"",
+              "aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin 371238580923.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com",
+              "cd /opt/dreamjobs-ai/${{ inputs.environment }}",
+              "docker compose pull ${{ inputs.service_name }}",
+              "docker compose up -d ${{ inputs.service_name }}",
+              "echo \"=== Deploy complete ===\"",
+              "docker ps --filter name=${{ inputs.environment }}-${{ inputs.service_name }} --format \"table {{.Names}}\\t{{.Status}}\\t{{.Ports}}\""
+            ]' \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "command_id=${COMMAND_ID}" >> "$GITHUB_OUTPUT"
+          echo "SSM Command ID: ${COMMAND_ID}"
+
+      - name: Wait for deployment
+        run: |
+          COMMAND_ID="${{ steps.ssm.outputs.command_id }}"
+          INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
+
+          echo "Waiting for SSM command ${COMMAND_ID}..."
+
+          for i in $(seq 1 60); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "${COMMAND_ID}" \
+              --instance-id "${INSTANCE_ID}" \
+              --query "Status" \
+              --output text 2>/dev/null || echo "Pending")
+
+            case "${STATUS}" in
+              Success)
+                echo "Deployment succeeded."
+
+                echo "### Output" >> "$GITHUB_STEP_SUMMARY"
+                aws ssm get-command-invocation \
+                  --command-id "${COMMAND_ID}" \
+                  --instance-id "${INSTANCE_ID}" \
+                  --query "StandardOutputContent" \
+                  --output text >> "$GITHUB_STEP_SUMMARY"
+
+                exit 0
+                ;;
+              Failed|TimedOut|Cancelled)
+                echo "::error::Deployment ${STATUS}."
+
+                echo "### Error Output" >> "$GITHUB_STEP_SUMMARY"
+                aws ssm get-command-invocation \
+                  --command-id "${COMMAND_ID}" \
+                  --instance-id "${INSTANCE_ID}" \
+                  --query "StandardErrorContent" \
+                  --output text >> "$GITHUB_STEP_SUMMARY"
+
+                exit 1
+                ;;
+              *)
+                echo "Status: ${STATUS} (attempt ${i}/60)"
+                sleep 5
+                ;;
+            esac
+          done
+
+          echo "::error::Timed out waiting for SSM command."
+          exit 1
+
+      - name: Deploy summary
+        if: always()
+        run: |
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Deployment Details" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameter | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Service** | \`${{ inputs.service_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Environment** | \`${{ inputs.environment }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Instance** | \`${{ secrets.EC2_INSTANCE_ID }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **SSM Command** | \`${{ steps.ssm.outputs.command_id }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Commit** | [\`${GITHUB_SHA::8}\`](${{ github.server_url }}/${{ github.repository }}/commit/${GITHUB_SHA}) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Triggered by** | @${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
