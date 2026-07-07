@@ -1,32 +1,36 @@
 name: Checkout platform layout
-description: Checkout a service repo and optional ai-common sibling for builds and tests.
+description: Checkout service + ai-common into platform/ sibling directories.
 
 inputs:
-  service_path:
-    description: Subdirectory for the calling service repo (e.g. ai_gateway)
+  service_name:
+    description: Service directory name under platform/ (e.g. ai_gateway, agent_b2b)
     required: true
   dependency_repository:
-    description: Optional dependency repo (default DreamJobsAI/ai-common)
+    description: Dependency repo (empty to skip)
     required: false
     default: DreamJobsAI/ai-common
-  dependency_path:
-    description: Checkout path for dependency (default ai_common)
+  dependency_name:
+    description: Dependency directory name under platform/
     required: false
     default: ai_common
   dependency_ref:
-    description: Git ref for dependency repo
+    description: Git ref for dependency
     required: false
     default: dev
 
 runs:
   using: composite
   steps:
+    - name: Create platform directory
+      shell: bash
+      run: mkdir -p platform
+
     - name: Checkout service
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
         fetch-tags: true
-        path: ${{ inputs.service_path }}
+        path: platform/${{ inputs.service_name }}
 
     - name: Checkout dependency
       if: inputs.dependency_repository != ''
@@ -34,4 +38,5 @@ runs:
       with:
         repository: ${{ inputs.dependency_repository }}
         ref: ${{ inputs.dependency_ref }}
-        path: ${{ inputs.dependency_path }}
+        path: platform/${{ inputs.dependency_name }}
+        token: ${{ github.token }}

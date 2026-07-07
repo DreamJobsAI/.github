@@ -1,16 +1,10 @@
 # ==============================================================================
 # Reusable Docker Build & Push to ECR
 # ==============================================================================
-#
-# Platform layout contract (when ai-common is required):
-#   $WORKSPACE/
-#     ai_common/      ← dependency
-#     {service}/      ← service repo (e.g. ai_gateway, agent_b2b)
-#
-# Service Dockerfile uses: COPY --from=ai_common
-# Docker build uses named context: ai_common=./ai_common
-#
-# Standalone services (mcps): leave service_checkout_path empty, no dependency.
+# Platform layout:
+#   platform/
+#     ai_gateway/ | agent_b2b/ | mcps/
+#     ai_common/              (when dependency_repository is set)
 # ==============================================================================
 
 name: Docker Build & Push to ECR
@@ -19,55 +13,43 @@ on:
   workflow_call:
     inputs:
       service_name:
-        description: "Service name (for logging and step summary)"
         required: true
         type: string
       aws_account_id:
-        description: "AWS account ID"
         required: true
         type: string
       aws_region:
-        description: "AWS region for ECR"
         required: false
         type: string
         default: "eu-central-1"
       ecr_repository:
-        description: "ECR repository name (e.g., dreamjobs-ai/ai-gateway)"
         required: true
         type: string
       dockerfile:
-        description: "Path to Dockerfile relative to service directory"
         required: false
         type: string
         default: "Dockerfile"
-      service_checkout_path:
-        description: "Service checkout subdirectory (empty = repo root, for standalone services)"
+      service_directory:
+        description: Directory under platform/ (e.g. ai_gateway). Empty = standalone at repo root.
         required: false
         type: string
         default: ""
       dependency_repository:
-        description: "Dependency repo (empty = none)"
         required: false
         type: string
         default: ""
-      dependency_path:
-        description: "Dependency checkout path"
-        required: false
-        type: string
-        default: "ai_common"
       dependency_ref:
-        description: "Git ref for dependency"
         required: false
         type: string
         default: "dev"
     secrets:
       AWS_ROLE_ARN:
-        description: "IAM role ARN for OIDC-based ECR push"
         required: true
 
 permissions:
   id-token: write
-  contents: write
+  contents: read
+  actions: read
 
 jobs:
   build-and-push:
@@ -81,33 +63,31 @@ jobs:
 
     steps:
       - name: Checkout standalone service
-        if: inputs.service_checkout_path == ''
+        if: inputs.service_directory == ''
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
 
       - name: Checkout platform layout
-        if: inputs.service_checkout_path != ''
+        if: inputs.service_directory != ''
         uses: DreamJobsAI/.github/.github/actions/checkout-platform@main
         with:
-          service_path: ${{ inputs.service_checkout_path }}
+          service_name: ${{ inputs.service_directory }}
           dependency_repository: ${{ inputs.dependency_repository }}
-          dependency_path: ${{ inputs.dependency_path }}
           dependency_ref: ${{ inputs.dependency_ref }}
 
       - name: Resolve paths
         id: paths
         run: |
-          if [ -n "${{ inputs.service_checkout_path }}" ]; then
-            echo "service_dir=${{ inputs.service_checkout_path }}" >> "$GITHUB_OUTPUT"
-            echo "build_context=${{ inputs.service_checkout_path }}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ inputs.service_directory }}" ]; then
+            echo "service_dir=platform/${{ inputs.service_directory }}" >> "$GITHUB_OUTPUT"
+            echo "build_context=platform/${{ inputs.service_directory }}" >> "$GITHUB_OUTPUT"
+            echo "has_dependency=true" >> "$GITHUB_OUTPUT"
           else
             echo "service_dir=." >> "$GITHUB_OUTPUT"
             echo "build_context=." >> "$GITHUB_OUTPUT"
-          fi
-          if [ -n "${{ inputs.dependency_repository }}" ]; then
-            echo "build_contexts=ai_common=${{ inputs.dependency_path }}" >> "$GITHUB_OUTPUT"
+            echo "has_dependency=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Determine version
@@ -147,12 +127,27 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push Docker image
+      - name: Build and push (with ai-common)
+        if: steps.paths.outputs.has_dependency == 'true'
         uses: docker/build-push-action@v6
         with:
           context: ${{ steps.paths.outputs.build_context }}
           file: ${{ inputs.dockerfile }}
-          build-contexts: ${{ steps.paths.outputs.build_contexts }}
+          build-contexts: ai_common=platform/ai_common
+          push: true
+          tags: |
+            ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
+            ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.rolling_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Build and push (standalone)
+        if: steps.paths.outputs.has_dependency == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.paths.outputs.build_context }}
+          file: ${{ inputs.dockerfile }}
           push: true
           tags: |
             ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
@@ -168,12 +163,3 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "${{ steps.version.outputs.version_tag }}"
           git push origin "${{ steps.version.outputs.version_tag }}"
-
-      - name: Build summary
-        if: always()
-        run: |
-          ECR_URL="${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}"
-          echo "### Docker Build — ${{ inputs.service_name }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Tag | \`${{ steps.version.outputs.version_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Rolling | \`${{ steps.version.outputs.rolling_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Image | \`${ECR_URL}:${{ steps.version.outputs.version_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
