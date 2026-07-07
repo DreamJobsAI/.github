@@ -44,3 +44,4 @@ runs:
         ref: ${{ inputs.dependency_ref }}
         path: platform/${{ inputs.dependency_name }}
         token: ${{ inputs.checkout_token }}
+        persist-credentials: false
