@@ -45,6 +45,8 @@ on:
     secrets:
       AWS_ROLE_ARN:
         required: true
+      CHECKOUT_TOKEN:
+        required: false
 
 permissions:
   id-token: write
@@ -76,6 +78,7 @@ jobs:
           service_name: ${{ inputs.service_directory }}
           dependency_repository: ${{ inputs.dependency_repository }}
           dependency_ref: ${{ inputs.dependency_ref }}
+          checkout_token: ${{ secrets.CHECKOUT_TOKEN }}
 
       - name: Resolve paths
         id: paths
