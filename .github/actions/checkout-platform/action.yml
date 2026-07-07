@@ -1,0 +1,37 @@
+name: Checkout platform layout
+description: Checkout a service repo and optional ai-common sibling for builds and tests.
+
+inputs:
+  service_path:
+    description: Subdirectory for the calling service repo (e.g. ai_gateway)
+    required: true
+  dependency_repository:
+    description: Optional dependency repo (default DreamJobsAI/ai-common)
+    required: false
+    default: DreamJobsAI/ai-common
+  dependency_path:
+    description: Checkout path for dependency (default ai_common)
+    required: false
+    default: ai_common
+  dependency_ref:
+    description: Git ref for dependency repo
+    required: false
+    default: dev
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout service
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+        path: ${{ inputs.service_path }}
+
+    - name: Checkout dependency
+      if: inputs.dependency_repository != ''
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.dependency_repository }}
+        ref: ${{ inputs.dependency_ref }}
+        path: ${{ inputs.dependency_path }}

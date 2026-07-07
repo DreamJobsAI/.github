@@ -2,25 +2,15 @@
 # Reusable Docker Build & Push to ECR
 # ==============================================================================
 #
-# Shared CI/CD engine for all DreamJobsAI Python services.
-# Caller repos provide service-specific inputs; this workflow handles:
-#   1. Auto-incrementing version tags (v1-dev, v2-staging, v3, ...)
-#   2. OIDC authentication to AWS
-#   3. Multi-stage Docker build with layer caching
-#   4. Push to ECR with versioned + rolling tags
-#   5. Git tag creation for traceability
+# Platform layout contract (when ai-common is required):
+#   $WORKSPACE/
+#     ai_common/      ← dependency
+#     {service}/      ← service repo (e.g. ai_gateway, agent_b2b)
 #
-# USAGE (in caller repo .github/workflows/docker-ci.yml):
-#   jobs:
-#     build:
-#       uses: DreamJobsAI/.github/.github/workflows/docker-build.yml@main
-#       with:
-#         service_name: "my-service"
-#         aws_account_id: "371238580923"
-#         ecr_repository: "dreamjobs-ai/my-service"
-#       secrets:
-#         AWS_ROLE_ARN: ${{ secrets.AWS_ECR_ROLE_ARN }}
+# Service Dockerfile uses: COPY --from=ai_common
+# Docker build uses named context: ai_common=./ai_common
 #
+# Standalone services (mcps): leave service_checkout_path empty, no dependency.
 # ==============================================================================
 
 name: Docker Build & Push to ECR
@@ -46,15 +36,30 @@ on:
         required: true
         type: string
       dockerfile:
-        description: "Path to Dockerfile relative to repo root"
+        description: "Path to Dockerfile relative to service directory"
         required: false
         type: string
-        default: "./Dockerfile"
-      build_context:
-        description: "Docker build context path"
+        default: "Dockerfile"
+      service_checkout_path:
+        description: "Service checkout subdirectory (empty = repo root, for standalone services)"
         required: false
         type: string
-        default: "."
+        default: ""
+      dependency_repository:
+        description: "Dependency repo (empty = none)"
+        required: false
+        type: string
+        default: ""
+      dependency_path:
+        description: "Dependency checkout path"
+        required: false
+        type: string
+        default: "ai_common"
+      dependency_ref:
+        description: "Git ref for dependency"
+        required: false
+        type: string
+        default: "dev"
     secrets:
       AWS_ROLE_ARN:
         description: "IAM role ARN for OIDC-based ECR push"
@@ -75,69 +80,60 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      # -----------------------------------------------------------------------
-      # 1. Checkout with full history (needed for tag-based version detection)
-      # -----------------------------------------------------------------------
-      - name: Checkout code
+      - name: Checkout standalone service
+        if: inputs.service_checkout_path == ''
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
 
-      # -----------------------------------------------------------------------
-      # 2. Compute the next version tag based on existing git tags
-      #
-      #    Branch mapping:
-      #      dev     → v{N}-dev     + latest-dev
-      #      staging → v{N}-staging + latest-staging
-      #      main    → v{N}         + latest
-      #
-      #    First build on any branch starts at v1.
-      # -----------------------------------------------------------------------
+      - name: Checkout platform layout
+        if: inputs.service_checkout_path != ''
+        uses: DreamJobsAI/.github/.github/actions/checkout-platform@main
+        with:
+          service_path: ${{ inputs.service_checkout_path }}
+          dependency_repository: ${{ inputs.dependency_repository }}
+          dependency_path: ${{ inputs.dependency_path }}
+          dependency_ref: ${{ inputs.dependency_ref }}
+
+      - name: Resolve paths
+        id: paths
+        run: |
+          if [ -n "${{ inputs.service_checkout_path }}" ]; then
+            echo "service_dir=${{ inputs.service_checkout_path }}" >> "$GITHUB_OUTPUT"
+            echo "build_context=${{ inputs.service_checkout_path }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "service_dir=." >> "$GITHUB_OUTPUT"
+            echo "build_context=." >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "${{ inputs.dependency_repository }}" ]; then
+            echo "build_contexts=ai_common=${{ inputs.dependency_path }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Determine version
         id: version
+        working-directory: ${{ steps.paths.outputs.service_dir }}
         run: |
           BRANCH="${GITHUB_REF_NAME}"
-
           case "${BRANCH}" in
             dev)     SUFFIX="-dev" ;;
             staging) SUFFIX="-staging" ;;
             main)    SUFFIX="" ;;
-            *)
-              echo "::error::Branch '${BRANCH}' is not configured for Docker builds. Only dev, staging, and main are supported."
-              exit 1
-              ;;
+            *) echo "::error::Unsupported branch: ${BRANCH}"; exit 1 ;;
           esac
-
           git fetch --tags --force
-
           if [ -z "${SUFFIX}" ]; then
             LATEST=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+$' | sed 's/^v//' | sort -n | tail -1)
           else
             LATEST=$(git tag --list "v[0-9]*${SUFFIX}" | sed "s/^v//; s/${SUFFIX}$//" | sort -n | tail -1)
           fi
-
           NEXT_VERSION=$(( ${LATEST:-0} + 1 ))
           VERSION_TAG="v${NEXT_VERSION}${SUFFIX}"
-
-          if [ -z "${SUFFIX}" ]; then
-            ROLLING_TAG="latest"
-          else
-            ROLLING_TAG="latest${SUFFIX}"
-          fi
-
+          ROLLING_TAG=$([ -z "${SUFFIX}" ] && echo "latest" || echo "latest${SUFFIX}")
           echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
           echo "rolling_tag=${ROLLING_TAG}" >> "$GITHUB_OUTPUT"
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
 
-          echo "### Version" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Branch:** \`${BRANCH}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Version tag:** \`${VERSION_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Rolling tag:** \`${ROLLING_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
-
-      # -----------------------------------------------------------------------
-      # 3. Authenticate to AWS via OIDC (no static credentials)
-      # -----------------------------------------------------------------------
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -145,26 +141,18 @@ jobs:
           aws-region: ${{ inputs.aws_region }}
           role-session-name: gha-ecr-${{ inputs.service_name }}-${{ github.run_id }}
 
-      # -----------------------------------------------------------------------
-      # 4. Login to ECR
-      # -----------------------------------------------------------------------
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      # -----------------------------------------------------------------------
-      # 5. Set up Docker Buildx for multi-stage builds + caching
-      # -----------------------------------------------------------------------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # -----------------------------------------------------------------------
-      # 6. Build and push with GHA layer cache
-      # -----------------------------------------------------------------------
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: ${{ inputs.build_context }}
+          context: ${{ steps.paths.outputs.build_context }}
           file: ${{ inputs.dockerfile }}
+          build-contexts: ${{ steps.paths.outputs.build_contexts }}
           push: true
           tags: |
             ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
@@ -173,33 +161,19 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
 
-      # -----------------------------------------------------------------------
-      # 7. Create git tag (only after successful push to ECR)
-      # -----------------------------------------------------------------------
       - name: Create git tag
+        working-directory: ${{ steps.paths.outputs.service_dir }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "${{ steps.version.outputs.version_tag }}"
           git push origin "${{ steps.version.outputs.version_tag }}"
 
-      # -----------------------------------------------------------------------
-      # 8. Job summary with all build details
-      # -----------------------------------------------------------------------
       - name: Build summary
         if: always()
         run: |
           ECR_URL="${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Docker Build Result" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Parameter | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-----------|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Service** | \`${{ inputs.service_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Branch** | \`${{ steps.version.outputs.branch }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Version tag** | \`${{ steps.version.outputs.version_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Rolling tag** | \`${{ steps.version.outputs.rolling_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **ECR image** | \`${ECR_URL}:${{ steps.version.outputs.version_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Commit** | [\`${GITHUB_SHA::8}\`](${{ github.server_url }}/${{ github.repository }}/commit/${GITHUB_SHA}) |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Triggered by** | @${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Docker Build — ${{ inputs.service_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tag | \`${{ steps.version.outputs.version_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Rolling | \`${{ steps.version.outputs.rolling_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image | \`${ECR_URL}:${{ steps.version.outputs.version_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
