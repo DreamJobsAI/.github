@@ -43,4 +43,4 @@ runs:
         repository: ${{ inputs.dependency_repository }}
         ref: ${{ inputs.dependency_ref }}
         path: platform/${{ inputs.dependency_name }}
-        token: ${{ inputs.checkout_token != '' && inputs.checkout_token || github.token }}
+        token: ${{ inputs.checkout_token }}
