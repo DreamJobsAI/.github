@@ -47,6 +47,7 @@ on:
         required: true
       CHECKOUT_TOKEN:
         required: false
+        description: Org secret GH_PLATFORM_READ_TOKEN; required when dependency_repository is set
 
 permissions:
   id-token: write

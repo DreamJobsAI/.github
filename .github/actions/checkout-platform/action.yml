@@ -36,6 +36,16 @@ runs:
         fetch-tags: true
         path: platform/${{ inputs.service_name }}
 
+    - name: Validate inputs
+      if: inputs.dependency_repository != ''
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.checkout_token }}" ]; then
+          echo "::error::checkout_token is required when dependency_repository is set."
+          echo "::error::Pass secrets.GH_PLATFORM_READ_TOKEN (org secret) from the caller workflow."
+          exit 1
+        fi
+
     - name: Checkout dependency
       if: inputs.dependency_repository != ''
       uses: actions/checkout@v4
