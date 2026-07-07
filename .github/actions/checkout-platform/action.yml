@@ -17,6 +17,10 @@ inputs:
     description: Git ref for dependency
     required: false
     default: dev
+  checkout_token:
+    description: Token for cross-repo dependency checkout (org secret GH_PLATFORM_READ_TOKEN)
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -39,4 +43,4 @@ runs:
         repository: ${{ inputs.dependency_repository }}
         ref: ${{ inputs.dependency_ref }}
         path: platform/${{ inputs.dependency_name }}
-        token: ${{ github.token }}
+        token: ${{ inputs.checkout_token != '' && inputs.checkout_token || github.token }}
