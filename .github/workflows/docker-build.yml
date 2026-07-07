@@ -1,10 +1,8 @@
 # ==============================================================================
 # Reusable Docker Build & Push to ECR
 # ==============================================================================
-# Platform layout:
-#   platform/
-#     ai_gateway/ | agent_b2b/ | mcps/
-#     ai_common/              (when dependency_repository is set)
+# Services that depend on ai-common install it from GitHub Packages (runtime-ci
+# Docker target). No cross-repo checkout required.
 # ==============================================================================
 
 name: Docker Build & Push to ECR
@@ -29,19 +27,10 @@ on:
         required: false
         type: string
         default: "Dockerfile"
-      service_directory:
-        description: Directory under platform/ (e.g. ai_gateway). Empty = standalone at repo root.
+      docker_target:
         required: false
         type: string
-        default: ""
-      dependency_repository:
-        required: false
-        type: string
-        default: ""
-      dependency_ref:
-        required: false
-        type: string
-        default: "dev"
+        default: "runtime-ci"
     secrets:
       AWS_ROLE_ARN:
         required: true
@@ -49,6 +38,7 @@ on:
 permissions:
   id-token: write
   contents: read
+  packages: read
   actions: read
 
 jobs:
@@ -62,37 +52,13 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - name: Checkout standalone service
-        if: inputs.service_directory == ''
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Checkout platform layout
-        if: inputs.service_directory != ''
-        uses: DreamJobsAI/.github/.github/actions/checkout-platform@main
-        with:
-          service_name: ${{ inputs.service_directory }}
-          dependency_repository: ${{ inputs.dependency_repository }}
-          dependency_ref: ${{ inputs.dependency_ref }}
-
-      - name: Resolve paths
-        id: paths
-        run: |
-          if [ -n "${{ inputs.service_directory }}" ]; then
-            echo "service_dir=platform/${{ inputs.service_directory }}" >> "$GITHUB_OUTPUT"
-            echo "build_context=platform/${{ inputs.service_directory }}" >> "$GITHUB_OUTPUT"
-            echo "has_dependency=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "service_dir=." >> "$GITHUB_OUTPUT"
-            echo "build_context=." >> "$GITHUB_OUTPUT"
-            echo "has_dependency=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Determine version
         id: version
-        working-directory: ${{ steps.paths.outputs.service_dir }}
         run: |
           BRANCH="${GITHUB_REF_NAME}"
           case "${BRANCH}" in
@@ -127,27 +93,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push (with ai-common)
-        if: steps.paths.outputs.has_dependency == 'true'
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ${{ steps.paths.outputs.build_context }}
+          context: .
           file: ${{ inputs.dockerfile }}
-          build-contexts: ai_common=platform/ai_common
-          push: true
-          tags: |
-            ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
-            ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.rolling_tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
-
-      - name: Build and push (standalone)
-        if: steps.paths.outputs.has_dependency == 'false'
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ steps.paths.outputs.build_context }}
-          file: ${{ inputs.dockerfile }}
+          target: ${{ inputs.docker_target }}
+          secrets: |
+            gh_token=${{ secrets.GITHUB_TOKEN }}
           push: true
           tags: |
             ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
@@ -157,7 +110,6 @@ jobs:
           provenance: false
 
       - name: Create git tag
-        working-directory: ${{ steps.paths.outputs.service_dir }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
