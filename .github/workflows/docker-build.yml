@@ -135,7 +135,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ steps.paths.outputs.build_context }}
-          file: ${{ inputs.dockerfile }}
+          file: ${{ steps.paths.outputs.service_dir }}/${{ inputs.dockerfile }}
           build-contexts: ai_common=platform/ai_common
           push: true
           tags: |
@@ -150,7 +150,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ steps.paths.outputs.build_context }}
-          file: ${{ inputs.dockerfile }}
+          file: ${{ steps.paths.outputs.service_dir }}/${{ inputs.dockerfile }}
           push: true
           tags: |
             ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
