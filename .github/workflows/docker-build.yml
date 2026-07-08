@@ -75,6 +75,16 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Create GitHub App token
+        if: inputs.service_directory != '' && inputs.dependency_repository != ''
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: DreamJobsAI
+          repositories: ai-common
+
       - name: Checkout platform layout
         if: inputs.service_directory != ''
         uses: DreamJobsAI/.github/.github/actions/checkout-platform@main
@@ -82,8 +92,7 @@ jobs:
           service_name: ${{ inputs.service_directory }}
           dependency_repository: ${{ inputs.dependency_repository }}
           dependency_ref: ${{ inputs.dependency_ref }}
-          app_id: ${{ secrets.GH_APP_ID }}
-          app_private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          checkout_token: ${{ steps.app-token.outputs.token }}
 
       - name: Resolve paths
         id: paths

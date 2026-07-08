@@ -17,12 +17,8 @@ inputs:
     description: Git ref for dependency
     required: false
     default: dev
-  app_id:
-    description: GitHub App ID (org secret GH_APP_ID) for cross-repo checkout
-    required: false
-    default: ""
-  app_private_key:
-    description: GitHub App private key PEM (org secret GH_APP_PRIVATE_KEY)
+  checkout_token:
+    description: Token for cross-repo dependency checkout (GitHub App installation token)
     required: false
     default: ""
 
@@ -40,25 +36,15 @@ runs:
         fetch-tags: true
         path: platform/${{ inputs.service_name }}
 
-    - name: Create GitHub App token
-      id: app-token
-      if: inputs.dependency_repository != ''
-      uses: actions/create-github-app-token@v1
-      with:
-        app-id: ${{ inputs.app_id }}
-        private-key: ${{ inputs.app_private_key }}
-        owner: DreamJobsAI
-        repositories: ai-common
-
     - name: Validate dependency checkout credentials
       if: inputs.dependency_repository != ''
       shell: bash
       env:
-        APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        CHECKOUT_TOKEN: ${{ inputs.checkout_token }}
       run: |
-        if [ -z "$APP_TOKEN" ]; then
-          echo "::error::GitHub App token is required for dependency checkout."
-          echo "::error::Set org secrets GH_APP_ID and GH_APP_PRIVATE_KEY; pass them to checkout-platform."
+        if [ -z "$CHECKOUT_TOKEN" ]; then
+          echo "::error::checkout_token is required when dependency_repository is set."
+          echo "::error::Generate a GitHub App token in the caller workflow and pass it here."
           exit 1
         fi
 
@@ -69,5 +55,5 @@ runs:
         repository: ${{ inputs.dependency_repository }}
         ref: ${{ inputs.dependency_ref }}
         path: platform/${{ inputs.dependency_name }}
-        token: ${{ steps.app-token.outputs.token }}
+        token: ${{ inputs.checkout_token }}
         persist-credentials: false
