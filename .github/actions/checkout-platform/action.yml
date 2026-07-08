@@ -42,7 +42,7 @@ runs:
 
     - name: Create GitHub App token
       id: app-token
-      if: inputs.dependency_repository != '' && inputs.app_id != ''
+      if: inputs.dependency_repository != ''
       uses: actions/create-github-app-token@v1
       with:
         app-id: ${{ inputs.app_id }}
