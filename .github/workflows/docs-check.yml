@@ -1,0 +1,73 @@
+# ==============================================================================
+# Reusable Documentation Check Workflow
+# ==============================================================================
+#
+# Validates that README.md exists and contains the required markdown sections.
+#
+# USAGE (in caller repo .github/workflows/docs-check.yml):
+#   name: Documentation Check
+#   on:
+#     pull_request:
+#       branches: [main]
+#   jobs:
+#     docs:
+#       uses: DreamJobsAI/.github/.github/workflows/docs-check.yml@main
+#
+# To override the required sections:
+#   jobs:
+#     docs:
+#       uses: DreamJobsAI/.github/.github/workflows/docs-check.yml@main
+#       with:
+#         required_sections: 'Description,Setup,Environment Variables,Run'
+#
+# ==============================================================================
+
+name: Documentation Check
+
+on:
+  workflow_call:
+    inputs:
+      required_sections:
+        description: "Comma-separated list of required ## sections in README.md"
+        required: false
+        type: string
+        default: 'Description,Setup,Environment Variables,Run'
+
+jobs:
+  validate-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Check README sections
+        run: |
+          echo "Checking if README.md exists..."
+          if [ ! -f "README.md" ] && [ ! -f "readme.md" ]; then
+            echo "Error: README.md is missing!"
+            exit 1
+          fi
+
+          README_FILE=$(find . -maxdepth 1 -iname "readme.md" | head -n 1)
+          echo "Found file: $README_FILE"
+
+          MISSING=0
+
+          IFS=',' read -ra SECTIONS <<< "${{ inputs.required_sections }}"
+          for section in "${SECTIONS[@]}"; do
+            section=$(echo "$section" | xargs)  # trim whitespace
+            if ! grep -qi "## *$section" "$README_FILE"; then
+              echo "Error: Required markdown section '## $section' is missing in README.md!"
+              MISSING=1
+            else
+              echo "Section '## $section' found."
+            fi
+          done
+
+          if [ $MISSING -ne 0 ]; then
+            echo "---"
+            echo "Please ensure your README.md follows the standard template with all required sections."
+            exit 1
+          fi
+
+          echo "All required documentation sections are present!"
