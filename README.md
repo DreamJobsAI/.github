@@ -12,11 +12,9 @@ Reusable workflows and composite actions for the DreamJobs AI platform.
 
 ## Documentation
 
-Platform-wide contracts (authoritative):
-
-- [Platform Build Contract](../setup/docs/02_platform-build-contract.md) — layout, Docker, CI rules
-- [CI Secrets & Onboarding](../setup/docs/03_ci-secrets-and-onboarding.md) — org secrets, IAM, checklist
-- [Docker CI/CD Setup](../infra/docs/02_docker-ci-cd-setup.md) — ECR, versioning, troubleshooting
+- [Platform Build Contract](../setup/docs/02_platform-build-contract.md)
+- [CI Secrets & Onboarding](../setup/docs/03_ci-secrets-and-onboarding.md)
+- [Docker CI/CD Setup](../infra/docs/02_docker-ci-cd-setup.md)
 
 ## Quick reference
 
@@ -27,7 +25,8 @@ Platform-wide contracts (authoritative):
   with:
     service_name: ai_gateway
     dependency_ref: ${{ github.head_ref || github.ref_name }}
-    checkout_token: ${{ secrets.GH_PLATFORM_READ_TOKEN }}
+    app_id: ${{ secrets.GH_APP_ID }}
+    app_private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 ```
 
 ### Docker workflow
@@ -36,8 +35,9 @@ Platform-wide contracts (authoritative):
 uses: DreamJobsAI/.github/.github/workflows/docker-build.yml@main
 secrets:
   AWS_ROLE_ARN: ${{ secrets.AWS_ECR_ROLE_ARN }}
-  CHECKOUT_TOKEN: ${{ secrets.GH_PLATFORM_READ_TOKEN }}  # when using ai-common
+  GH_APP_ID: ${{ secrets.GH_APP_ID }}
+  GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
 ```
 
-Org secrets `GH_PLATFORM_READ_TOKEN` and `AWS_ECR_ROLE_ARN` must be configured once
-at the organization level. See [03_ci-secrets-and-onboarding.md](../setup/docs/03_ci-secrets-and-onboarding.md).
+Org secrets `GH_APP_ID`, `GH_APP_PRIVATE_KEY`, and `AWS_ECR_ROLE_ARN` are configured
+once at the organization level.

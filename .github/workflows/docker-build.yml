@@ -45,9 +45,12 @@ on:
     secrets:
       AWS_ROLE_ARN:
         required: true
-      CHECKOUT_TOKEN:
+      GH_APP_ID:
         required: false
-        description: Org secret GH_PLATFORM_READ_TOKEN; required when dependency_repository is set
+        description: Org secret GH_APP_ID; required when dependency_repository is set
+      GH_APP_PRIVATE_KEY:
+        required: false
+        description: Org secret GH_APP_PRIVATE_KEY; required when dependency_repository is set
 
 permissions:
   id-token: write
@@ -79,7 +82,8 @@ jobs:
           service_name: ${{ inputs.service_directory }}
           dependency_repository: ${{ inputs.dependency_repository }}
           dependency_ref: ${{ inputs.dependency_ref }}
-          checkout_token: ${{ secrets.CHECKOUT_TOKEN }}
+          app_id: ${{ secrets.GH_APP_ID }}
+          app_private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
       - name: Resolve paths
         id: paths
