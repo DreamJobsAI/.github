@@ -1,0 +1,92 @@
+# ==============================================================================
+# Reusable Local Docs Aggregator Workflow
+# ==============================================================================
+#
+# Aggregates all markdown files from docs/ into README.md between
+# <!-- DOCS-START --> and <!-- DOCS-END --> marker tags, then commits
+# and pushes the result.
+#
+# USAGE (in caller repo .github/workflows/local-docs-aggregator.yml):
+#   name: Local Docs Aggregator
+#   on:
+#     push:
+#       branches: [main]
+#       paths: ['docs/**']
+#     workflow_dispatch:
+#   jobs:
+#     aggregate:
+#       uses: DreamJobsAI/.github/.github/workflows/local-docs-aggregator.yml@main
+#
+# ==============================================================================
+
+name: Local Docs Aggregator
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  aggregate-local-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Aggregate markdown files from docs/ into README.md
+        run: |
+          python -c "
+          import os
+
+          readme_path = 'README.md'
+          docs_dir = 'docs'
+
+          # Check if both the docs directory and README.md exist
+          if not os.path.exists(docs_dir) or not os.path.exists(readme_path):
+              print('Docs directory or README.md missing. Exiting.')
+              exit(0)
+
+          with open(readme_path, 'r', encoding='utf-8') as f:
+              content = f.read()
+
+          start_tag = '<!-- DOCS-START -->'
+          end_tag = '<!-- DOCS-END -->'
+
+          # Verify that the magic tags are present in the README
+          if start_tag in content and end_tag in content:
+              before = content.split(start_tag)[0]
+              after = content.split(end_tag)[1]
+
+              aggregated_content = '\n\n'
+
+              # Read and sort markdown files alphabetically (handles numbered sorting like 01_, 02_)
+              for file in sorted(os.listdir(docs_dir)):
+                  if file.endswith('.md'):
+                      print(f'Processing file: {file}')
+                      with open(os.path.join(docs_dir, file), 'r', encoding='utf-8') as df:
+                          aggregated_content += df.read() + '\n\n---\n\n'
+
+              # Reconstruct the README with the new aggregated content between the tags
+              new_content = before + start_tag + aggregated_content + end_tag + after
+
+              with open(readme_path, 'w', encoding='utf-8') as f:
+                  f.write(new_content)
+              print('Local README.md successfully updated with docs/ content!')
+          else:
+              print('Error: Missing and tags in README.md!')
+              exit(1)
+          "
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+
+          if ! git diff --staged --quiet; then
+            git commit -m "docs: auto-aggregate internal markdown files to README [skip ci]"
+            git push
+          else
+            echo "No changes detected in documentation. Skipping push."
+          fi
