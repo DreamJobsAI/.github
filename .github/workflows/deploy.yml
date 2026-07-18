@@ -32,6 +32,10 @@ on:
         description: "Target environment (dev or staging)"
         required: true
         type: string
+      aws_account_id:
+        description: "AWS account ID for ECR login"
+        required: true
+        type: string
       aws_region:
         description: "AWS region"
         required: false
@@ -86,7 +90,7 @@ jobs:
             --parameters commands='[
               "set -e",
               "echo \"=== Deploying ${{ inputs.service_name }} to ${{ inputs.environment }} ===\"",
-              "aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin 371238580923.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com",
+              "aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com",
               "cd /opt/dreamjobs-ai/${{ inputs.environment }}",
               "docker compose pull ${{ inputs.service_name }}",
               "docker compose up -d ${{ inputs.service_name }}",
