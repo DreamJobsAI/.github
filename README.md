@@ -19,6 +19,7 @@ Reusable workflows and composite actions for the DreamJobs AI platform.
 
 ## Documentation
 
+- [Access Control & Team Permissions](docs/access-control.md)
 - [Platform Build Contract](../setup/docs/02_platform-build-contract.md)
 - [CI Secrets & Onboarding](../setup/docs/03_ci-secrets-and-onboarding.md)
 
