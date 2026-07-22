@@ -29,6 +29,11 @@ on:
         required: false
         type: string
         default: "Dockerfile"
+      docker_target:
+        description: "Docker build target stage (--target). Empty = default target."
+        required: false
+        type: string
+        default: ""
       service_directory:
         description: Directory under platform/ (e.g. ai_gateway). Empty = standalone at repo root.
         required: false
@@ -150,6 +155,7 @@ jobs:
         with:
           context: ${{ steps.paths.outputs.build_context }}
           file: ${{ steps.paths.outputs.service_dir }}/${{ inputs.dockerfile }}
+          target: ${{ inputs.docker_target || '' }}
           build-contexts: ai_common=platform/ai_common
           push: true
           tags: |
@@ -165,6 +171,7 @@ jobs:
         with:
           context: ${{ steps.paths.outputs.build_context }}
           file: ${{ steps.paths.outputs.service_dir }}/${{ inputs.dockerfile }}
+          target: ${{ inputs.docker_target || '' }}
           push: true
           tags: |
             ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
