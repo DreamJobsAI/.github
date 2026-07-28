@@ -16,8 +16,10 @@ on:
         required: true
         type: string
       aws_account_id:
-        required: true
+        description: "AWS account ID (ECR registry host)"
+        required: false
         type: string
+        default: "371238580923"
       aws_region:
         required: false
         type: string

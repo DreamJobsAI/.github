@@ -5,10 +5,14 @@
 # Deploys a single service to the dev or staging environment on the shared
 # EC2 instance by executing docker compose pull + up via SSM RunShellScript.
 #
-# USAGE (in caller repo .github/workflows/docker-ci.yml):
+# USAGE (caller docker-ci.yml) — Deploy is manual, not on every push:
+#   on:
+#     workflow_dispatch:
+#       inputs:
+#         deploy: { type: boolean, default: false }
 #   deploy:
 #     needs: build
-#     if: github.ref_name == 'dev' || github.ref_name == 'staging'
+#     if: github.event_name == 'workflow_dispatch' && inputs.deploy == true
 #     uses: DreamJobsAI/.github/.github/workflows/deploy.yml@main
 #     with:
 #       service_name: "ai-gateway"
@@ -34,8 +38,9 @@ on:
         type: string
       aws_account_id:
         description: "AWS account ID for ECR login"
-        required: true
+        required: false
         type: string
+        default: "371238580923"
       aws_region:
         description: "AWS region"
         required: false
