@@ -2,25 +2,19 @@
 # Reusable Deploy Workflow — SSM-based deployment to EC2
 # ==============================================================================
 #
-# Deploys a single service to the dev or staging environment on the shared
-# EC2 instance by executing docker compose pull + up via SSM RunShellScript.
+# Deploys a single service via docker compose pull + up on the target host.
+#
+# GitHub Environment names: dev | staging | production
+# Host stack directories:     /opt/dreamjobs-ai/{dev,staging,prod}
+# (production → prod on disk)
 #
 # USAGE (caller docker-ci.yml) — Deploy is manual, not on every push:
-#   on:
-#     workflow_dispatch:
-#       inputs:
-#         deploy: { type: boolean, default: false }
 #   deploy:
-#     needs: build
 #     if: github.event_name == 'workflow_dispatch' && inputs.deploy == true
 #     uses: DreamJobsAI/.github/.github/workflows/deploy.yml@main
 #     with:
 #       service_name: "ai-gateway"
-#       environment: ${{ github.ref_name }}
-#     secrets:
-#       AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-#       EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
-#
+#       environment: ${{ github.ref_name == 'main' && 'production' || github.ref_name }}
 # ==============================================================================
 
 name: Deploy to EC2
@@ -33,7 +27,7 @@ on:
         required: true
         type: string
       environment:
-        description: "Target environment (dev or staging)"
+        description: "GitHub Environment (dev, staging, or production)"
         required: true
         type: string
       aws_account_id:
@@ -70,12 +64,24 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - name: Validate environment
+      - name: Validate environment and resolve stack dir
+        id: stack
         run: |
-          if [[ "${{ inputs.environment }}" != "dev" && "${{ inputs.environment }}" != "staging" ]]; then
-            echo "::error::Invalid environment '${{ inputs.environment }}'. Only 'dev' and 'staging' are supported."
-            exit 1
-          fi
+          ENV="${{ inputs.environment }}"
+          case "${ENV}" in
+            dev|staging)
+              STACK_DIR="${ENV}"
+              ;;
+            production)
+              STACK_DIR="prod"
+              ;;
+            *)
+              echo "::error::Invalid environment '${ENV}'. Use 'dev', 'staging', or 'production'."
+              exit 1
+              ;;
+          esac
+          echo "stack_dir=${STACK_DIR}" >> "$GITHUB_OUTPUT"
+          echo "Resolved GitHub env '${ENV}' → host stack '/opt/dreamjobs-ai/${STACK_DIR}'"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
@@ -87,26 +93,44 @@ jobs:
       - name: Deploy via SSM
         id: ssm
         run: |
+          STACK_DIR="${{ steps.stack.outputs.stack_dir }}"
+          SERVICE="${{ inputs.service_name }}"
+          ENV_NAME="${{ inputs.environment }}"
+          REGION="${{ inputs.aws_region }}"
+          ACCOUNT="${{ inputs.aws_account_id }}"
+          INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
+
+          PARAMS=$(jq -nc \
+            --arg sd "$STACK_DIR" \
+            --arg svc "$SERVICE" \
+            --arg env "$ENV_NAME" \
+            --arg region "$REGION" \
+            --arg account "$ACCOUNT" \
+            '{
+              commands: [
+                "set -e",
+                ("echo \"=== Deploying " + $svc + " to " + $env + " (stack=" + $sd + ") ===\""),
+                ("aws ecr get-login-password --region " + $region + " | docker login --username AWS --password-stdin " + $account + ".dkr.ecr." + $region + ".amazonaws.com"),
+                ("cd /opt/dreamjobs-ai/" + $sd),
+                ("docker compose pull " + $svc),
+                ("docker compose up -d " + $svc),
+                "echo \"=== Deploy complete ===\"",
+                ("docker ps --filter name=" + $sd + "-" + $svc + " --format \"table {{.Names}}\\t{{.Status}}\\t{{.Ports}}\"")
+              ]
+            }')
+
           COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
             --timeout-seconds 300 \
-            --comment "Deploy ${{ inputs.service_name }} to ${{ inputs.environment }} (run ${{ github.run_id }})" \
-            --parameters commands='[
-              "set -e",
-              "echo \"=== Deploying ${{ inputs.service_name }} to ${{ inputs.environment }} ===\"",
-              "aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com",
-              "cd /opt/dreamjobs-ai/${{ inputs.environment }}",
-              "docker compose pull ${{ inputs.service_name }}",
-              "docker compose up -d ${{ inputs.service_name }}",
-              "echo \"=== Deploy complete ===\"",
-              "docker ps --filter name=${{ inputs.environment }}-${{ inputs.service_name }} --format \"table {{.Names}}\\t{{.Status}}\\t{{.Ports}}\""
-            ]' \
+            --comment "Deploy ${SERVICE} to ${ENV_NAME} (run ${{ github.run_id }})" \
+            --parameters "${PARAMS}" \
             --query "Command.CommandId" \
             --output text)
 
           echo "command_id=${COMMAND_ID}" >> "$GITHUB_OUTPUT"
           echo "SSM Command ID: ${COMMAND_ID}"
+
 
       - name: Wait for deployment
         run: |
@@ -167,6 +191,7 @@ jobs:
           echo "|-----------|-------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| **Service** | \`${{ inputs.service_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **Environment** | \`${{ inputs.environment }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Stack dir** | \`/opt/dreamjobs-ai/${{ steps.stack.outputs.stack_dir }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **Instance** | \`${{ secrets.EC2_INSTANCE_ID }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **SSM Command** | \`${{ steps.ssm.outputs.command_id }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **Commit** | [\`${GITHUB_SHA::8}\`](${{ github.server_url }}/${{ github.repository }}/commit/${GITHUB_SHA}) |" >> "$GITHUB_STEP_SUMMARY"
