@@ -5,6 +5,11 @@
 #   platform/
 #     ai_gateway/ | agent_b2b/ | mcps/
 #     ai_common/              (when dependency_repository is set)
+#
+# Tags every successful build with BOTH:
+#   - version tag: v{N} | v{N}-dev | v{N}-staging  (immutable)
+#   - rolling tag: latest | latest-dev | latest-staging
+# Callers should pass version_tag into deploy so the VM pins that image.
 # ==============================================================================
 
 name: Docker Build & Push to ECR
@@ -49,6 +54,13 @@ on:
         required: false
         type: string
         default: "dev"
+    outputs:
+      version_tag:
+        description: Immutable version tag pushed to ECR (e.g. v12-dev)
+        value: ${{ jobs.build-and-push.outputs.version_tag }}
+      rolling_tag:
+        description: Rolling tag pushed alongside the version (e.g. latest-dev)
+        value: ${{ jobs.build-and-push.outputs.rolling_tag }}
     secrets:
       AWS_ROLE_ARN:
         required: true
@@ -69,9 +81,12 @@ jobs:
     name: "Build ${{ inputs.service_name }}"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      version_tag: ${{ steps.version.outputs.version_tag }}
+      rolling_tag: ${{ steps.version.outputs.rolling_tag }}
 
     concurrency:
-      group: docker-${{ github.repository }}-${{ github.ref_name }}
+      group: docker-${{ github.repository }}-${{ github.ref_name }}-${{ inputs.service_name }}
       cancel-in-progress: false
 
     steps:
@@ -137,6 +152,15 @@ jobs:
           echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
           echo "rolling_tag=${ROLLING_TAG}" >> "$GITHUB_OUTPUT"
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Image tags — \`${{ inputs.service_name }}\`"
+            echo ""
+            echo "| Kind | Tag |"
+            echo "|------|-----|"
+            echo "| **version** | \`${VERSION_TAG}\` |"
+            echo "| **rolling** | \`${ROLLING_TAG}\` |"
+            echo "| **ECR** | \`${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1

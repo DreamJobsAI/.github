@@ -2,19 +2,14 @@
 # Reusable Deploy Workflow — SSM-based deployment to EC2
 # ==============================================================================
 #
-# Deploys a single service via docker compose pull + up on the target host.
+# Deploys a single service via docker compose on the target host.
+# Prefer pinning the immutable version tag from docker-build (image_tag input).
 #
 # GitHub Environment names: dev | staging | production
 # Host stack directories:     /opt/dreamjobs-ai/{dev,staging,prod}
-# (production → prod on disk)
 #
-# USAGE (caller docker-ci.yml) — Deploy is manual, not on every push:
-#   deploy:
-#     if: github.event_name == 'workflow_dispatch' && inputs.deploy == true
-#     uses: DreamJobsAI/.github/.github/workflows/deploy.yml@main
-#     with:
-#       service_name: "ai-gateway"
-#       environment: ${{ github.ref_name == 'main' && 'production' || github.ref_name }}
+# On push: callers attempt deploy; if EC2 is stopped and skip_if_instance_stopped
+# is true, exits 0 with ::warning:: (visible). Manual deploy fails if stopped.
 # ==============================================================================
 
 name: Deploy to EC2
@@ -30,6 +25,16 @@ on:
         description: "GitHub Environment (dev, staging, or production)"
         required: true
         type: string
+      image_tag:
+        description: "ECR tag to pin (e.g. v12-dev). Empty = stack rolling tag from .env"
+        required: false
+        type: string
+        default: ""
+      skip_if_instance_stopped:
+        description: "If true, exit 0 with warning when EC2 is not running (push path)"
+        required: false
+        type: boolean
+        default: true
       aws_account_id:
         description: "AWS account ID for ECR login"
         required: false
@@ -56,7 +61,7 @@ jobs:
   deploy:
     name: "Deploy ${{ inputs.service_name }} → ${{ inputs.environment }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     environment: ${{ inputs.environment }}
 
     concurrency:
@@ -90,40 +95,114 @@ jobs:
           aws-region: ${{ inputs.aws_region }}
           role-session-name: gha-deploy-${{ inputs.service_name }}-${{ inputs.environment }}-${{ github.run_id }}
 
+      - name: Check EC2 instance state
+        id: instance
+        run: |
+          INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
+          STATE=$(aws ec2 describe-instances \
+            --instance-ids "${INSTANCE_ID}" \
+            --query 'Reservations[0].Instances[0].State.Name' \
+            --output text 2>/tmp/ec2-desc.err || echo "unknown")
+
+          echo "state=${STATE}" >> "$GITHUB_OUTPUT"
+          echo "Instance ${INSTANCE_ID} state: ${STATE}"
+
+          if [ "${STATE}" = "running" ]; then
+            echo "deployable=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          MSG="EC2 ${INSTANCE_ID} is '${STATE}' — cannot deploy ${{ inputs.service_name }} to ${{ inputs.environment }}."
+          if [ "${{ inputs.skip_if_instance_stopped }}" = "true" ]; then
+            echo "::warning title=Deploy skipped (instance not running)::${MSG} Images were still built/pushed to ECR."
+            {
+              echo "## Deploy skipped"
+              echo ""
+              echo "${MSG}"
+              echo ""
+              echo "Images remain in ECR. Start the instance and re-run with \`deploy=true\`, or wait for the next push while the VM is up."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "deployable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::error::${MSG}"
+          cat /tmp/ec2-desc.err >&2 || true
+          exit 1
+
       - name: Deploy via SSM
         id: ssm
+        if: steps.instance.outputs.deployable == 'true'
         run: |
+          set -euo pipefail
           STACK_DIR="${{ steps.stack.outputs.stack_dir }}"
           SERVICE="${{ inputs.service_name }}"
           ENV_NAME="${{ inputs.environment }}"
           REGION="${{ inputs.aws_region }}"
           ACCOUNT="${{ inputs.aws_account_id }}"
           INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
+          IMAGE_TAG="${{ inputs.image_tag }}"
+          ECR_IMAGE="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/dreamjobs-ai/${SERVICE}"
+          TAG_KEY=$(echo "${SERVICE}" | tr 'a-z-' 'A-Z_')
+          CONTAINER="${STACK_DIR}-${SERVICE}"
 
-          PARAMS=$(jq -nc \
-            --arg sd "$STACK_DIR" \
-            --arg svc "$SERVICE" \
-            --arg env "$ENV_NAME" \
-            --arg region "$REGION" \
-            --arg account "$ACCOUNT" \
-            '{
-              commands: [
-                "set -e",
-                ("echo \"=== Deploying " + $svc + " to " + $env + " (stack=" + $sd + ") ===\""),
-                ("aws ecr get-login-password --region " + $region + " | docker login --username AWS --password-stdin " + $account + ".dkr.ecr." + $region + ".amazonaws.com"),
-                ("cd /opt/dreamjobs-ai/" + $sd),
-                ("docker compose pull " + $svc),
-                ("docker compose up -d " + $svc),
-                "echo \"=== Deploy complete ===\"",
-                ("docker ps --filter name=" + $sd + "-" + $svc + " --format \"table {{.Names}}\\t{{.Status}}\\t{{.Ports}}\"")
-              ]
-            }')
+          # Build remote script as a single bash -c payload (reliable quoting).
+          if [ -n "${IMAGE_TAG}" ]; then
+            REMOTE=$(cat <<EOF
+          set -euo pipefail
+          echo "=== Deploying ${SERVICE} → ${ENV_NAME} (stack=${STACK_DIR} tag=${IMAGE_TAG}) ==="
+          aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com
+          cd /opt/dreamjobs-ai/${STACK_DIR}
+          printf '%s\n' 'services:' '  ${SERVICE}:' '    image: ${ECR_IMAGE}:${IMAGE_TAG}' > /tmp/dj-image-override.yml
+          docker compose -f docker-compose.yml -f /tmp/dj-image-override.yml pull ${SERVICE}
+          docker compose -f docker-compose.yml -f /tmp/dj-image-override.yml up -d --no-deps --force-recreate ${SERVICE}
+          touch deployed-tags.env
+          grep -v '^${TAG_KEY}=' deployed-tags.env > /tmp/dj-tags.env || true
+          echo '${TAG_KEY}=${IMAGE_TAG}' >> /tmp/dj-tags.env
+          mv /tmp/dj-tags.env deployed-tags.env
+          DEADLINE=\$((SECONDS+120))
+          while :; do
+            H=\$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ${CONTAINER} 2>/dev/null || echo missing)
+            echo "health=\$H"
+            [ "\$H" = "healthy" ] || [ "\$H" = "none" ] && break
+            [ \$SECONDS -ge \$DEADLINE ] && { docker logs --tail 40 ${CONTAINER} || true; exit 1; }
+            sleep 5
+          done
+          echo "=== Deploy complete ==="
+          docker ps --filter name=${CONTAINER} --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+          EOF
+          )
+          else
+            REMOTE=$(cat <<EOF
+          set -euo pipefail
+          echo "=== Deploying ${SERVICE} → ${ENV_NAME} (stack=${STACK_DIR} rolling tag from .env) ==="
+          aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com
+          cd /opt/dreamjobs-ai/${STACK_DIR}
+          docker compose pull ${SERVICE}
+          docker compose up -d --no-deps ${SERVICE}
+          DEADLINE=\$((SECONDS+120))
+          while :; do
+            H=\$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ${CONTAINER} 2>/dev/null || echo missing)
+            echo "health=\$H"
+            [ "\$H" = "healthy" ] || [ "\$H" = "none" ] && break
+            [ \$SECONDS -ge \$DEADLINE ] && { docker logs --tail 40 ${CONTAINER} || true; exit 1; }
+            sleep 5
+          done
+          echo "=== Deploy complete ==="
+          docker ps --filter name=${CONTAINER} --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+          EOF
+          )
+          fi
+
+          # One multiline shell script — AWS-RunShellScript executes each array
+          # entry with the instance shell; keep it as a single entry.
+          PARAMS=$(jq -nc --arg script "$REMOTE" '{commands: [$script]}')
 
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --timeout-seconds 300 \
-            --comment "Deploy ${SERVICE} to ${ENV_NAME} (run ${{ github.run_id }})" \
+            --timeout-seconds 360 \
+            --comment "Deploy ${SERVICE} ${IMAGE_TAG:-rolling} to ${ENV_NAME} (run ${{ github.run_id }})" \
             --parameters "${PARAMS}" \
             --query "Command.CommandId" \
             --output text)
@@ -131,15 +210,15 @@ jobs:
           echo "command_id=${COMMAND_ID}" >> "$GITHUB_OUTPUT"
           echo "SSM Command ID: ${COMMAND_ID}"
 
-
       - name: Wait for deployment
+        if: steps.instance.outputs.deployable == 'true'
         run: |
           COMMAND_ID="${{ steps.ssm.outputs.command_id }}"
           INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
 
           echo "Waiting for SSM command ${COMMAND_ID}..."
 
-          for i in $(seq 1 60); do
+          for i in $(seq 1 72); do
             STATUS=$(aws ssm get-command-invocation \
               --command-id "${COMMAND_ID}" \
               --instance-id "${INSTANCE_ID}" \
@@ -149,30 +228,31 @@ jobs:
             case "${STATUS}" in
               Success)
                 echo "Deployment succeeded."
-
                 echo "### Output" >> "$GITHUB_STEP_SUMMARY"
                 aws ssm get-command-invocation \
                   --command-id "${COMMAND_ID}" \
                   --instance-id "${INSTANCE_ID}" \
                   --query "StandardOutputContent" \
                   --output text >> "$GITHUB_STEP_SUMMARY"
-
                 exit 0
                 ;;
               Failed|TimedOut|Cancelled)
                 echo "::error::Deployment ${STATUS}."
-
                 echo "### Error Output" >> "$GITHUB_STEP_SUMMARY"
                 aws ssm get-command-invocation \
                   --command-id "${COMMAND_ID}" \
                   --instance-id "${INSTANCE_ID}" \
                   --query "StandardErrorContent" \
                   --output text >> "$GITHUB_STEP_SUMMARY"
-
+                aws ssm get-command-invocation \
+                  --command-id "${COMMAND_ID}" \
+                  --instance-id "${INSTANCE_ID}" \
+                  --query "StandardOutputContent" \
+                  --output text >> "$GITHUB_STEP_SUMMARY"
                 exit 1
                 ;;
               *)
-                echo "Status: ${STATUS} (attempt ${i}/60)"
+                echo "Status: ${STATUS} (attempt ${i}/72)"
                 sleep 5
                 ;;
             esac
@@ -184,15 +264,20 @@ jobs:
       - name: Deploy summary
         if: always()
         run: |
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Deployment Details" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Parameter | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-----------|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Service** | \`${{ inputs.service_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Environment** | \`${{ inputs.environment }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Stack dir** | \`/opt/dreamjobs-ai/${{ steps.stack.outputs.stack_dir }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Instance** | \`${{ secrets.EC2_INSTANCE_ID }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **SSM Command** | \`${{ steps.ssm.outputs.command_id }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Commit** | [\`${GITHUB_SHA::8}\`](${{ github.server_url }}/${{ github.repository }}/commit/${GITHUB_SHA}) |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Triggered by** | @${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo ""
+            echo "### Deployment Details"
+            echo ""
+            echo "| Parameter | Value |"
+            echo "|-----------|-------|"
+            echo "| **Service** | \`${{ inputs.service_name }}\` |"
+            echo "| **Environment** | \`${{ inputs.environment }}\` |"
+            echo "| **Image tag** | \`${{ inputs.image_tag || '(rolling from .env)' }}\` |"
+            echo "| **Stack dir** | \`/opt/dreamjobs-ai/${{ steps.stack.outputs.stack_dir }}\` |"
+            echo "| **Instance** | \`${{ secrets.EC2_INSTANCE_ID }}\` |"
+            echo "| **Instance state** | \`${{ steps.instance.outputs.state || 'n/a' }}\` |"
+            echo "| **Deployed** | \`${{ steps.instance.outputs.deployable || 'false' }}\` |"
+            echo "| **SSM Command** | \`${{ steps.ssm.outputs.command_id || 'n/a' }}\` |"
+            echo "| **Commit** | [\`${GITHUB_SHA::8}\`](${{ github.server_url }}/${{ github.repository }}/commit/${GITHUB_SHA}) |"
+            echo "| **Triggered by** | @${{ github.actor }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
