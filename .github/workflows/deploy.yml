@@ -171,7 +171,7 @@ jobs:
           echo "=== Deploy complete ==="
           docker ps --filter name=${CONTAINER} --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
           echo "=== Cleaning old images ==="
-          docker images --format '{{.Repository}}:{{.Tag}}' | grep "dreamjobs-ai/${SERVICE}:" | grep -v ":${IMAGE_TAG}\$" | grep -v ":latest" | xargs -r docker rmi 2>/dev/null || true
+          docker images --format '{{.Repository}}:{{.Tag}}' | grep "dreamjobs-ai/${SERVICE}:" | grep -v ":${IMAGE_TAG}\$" | xargs -r docker rmi 2>/dev/null || true
           docker image prune -f 2>/dev/null || true
           echo "=== Cleanup done ==="
           EOF
