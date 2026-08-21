@@ -153,13 +153,16 @@ jobs:
           echo "=== Deploying ${SERVICE} → ${ENV_NAME} (stack=${STACK_DIR} tag=${IMAGE_TAG}) ==="
           aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com
           cd /opt/dreamjobs-ai/${STACK_DIR}
-          printf '%s\n' 'services:' '  ${SERVICE}:' '    image: ${ECR_IMAGE}:${IMAGE_TAG}' > /tmp/dj-image-override.yml
-          docker compose -f docker-compose.yml -f /tmp/dj-image-override.yml pull ${SERVICE}
-          docker compose -f docker-compose.yml -f /tmp/dj-image-override.yml up -d --no-deps --force-recreate ${SERVICE}
+          OVERRIDE="/tmp/dj-override-${SERVICE}-${STACK_DIR}.yml"
+          printf '%s\n' 'services:' '  ${SERVICE}:' '    image: ${ECR_IMAGE}:${IMAGE_TAG}' > "\${OVERRIDE}"
+          docker compose -f docker-compose.yml -f "\${OVERRIDE}" pull ${SERVICE}
+          docker compose -f docker-compose.yml -f "\${OVERRIDE}" up -d --no-deps --force-recreate ${SERVICE}
+          rm -f "\${OVERRIDE}"
           touch deployed-tags.env
-          grep -v '^${TAG_KEY}=' deployed-tags.env > /tmp/dj-tags.env || true
-          echo '${TAG_KEY}=${IMAGE_TAG}' >> /tmp/dj-tags.env
-          mv /tmp/dj-tags.env deployed-tags.env
+          TAGS_TMP=\$(mktemp /tmp/dj-tags-XXXXXX)
+          grep -v '^${TAG_KEY}=' deployed-tags.env > "\${TAGS_TMP}" || true
+          echo '${TAG_KEY}=${IMAGE_TAG}' >> "\${TAGS_TMP}"
+          mv "\${TAGS_TMP}" deployed-tags.env
           DEADLINE=\$((SECONDS+120))
           while :; do
             H=\$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ${CONTAINER} 2>/dev/null || echo missing)
