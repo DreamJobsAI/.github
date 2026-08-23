@@ -6,10 +6,10 @@
 #     ai_gateway/ | agent_b2b/ | mcps/
 #     ai_common/              (when dependency_repository is set)
 #
-# Tags every successful build with BOTH:
-#   - version tag: v{N} | v{N}-dev | v{N}-staging  (immutable)
-#   - rolling tag: latest | latest-dev | latest-staging
-# Callers should pass version_tag into deploy so the VM pins that image.
+# Tags every successful build with a single immutable version tag:
+#   v{N} | v{N}-dev | v{N}-staging
+# Callers pass version_tag into deploy so the VM pins that exact image.
+# No rolling tags (latest-*) — the VM always runs a specific version.
 # ==============================================================================
 
 name: Docker Build & Push to ECR
@@ -58,9 +58,6 @@ on:
       version_tag:
         description: Immutable version tag pushed to ECR (e.g. v12-dev)
         value: ${{ jobs.build-and-push.outputs.version_tag }}
-      rolling_tag:
-        description: Rolling tag pushed alongside the version (e.g. latest-dev)
-        value: ${{ jobs.build-and-push.outputs.rolling_tag }}
     secrets:
       AWS_ROLE_ARN:
         required: true
@@ -83,7 +80,6 @@ jobs:
     timeout-minutes: 15
     outputs:
       version_tag: ${{ steps.version.outputs.version_tag }}
-      rolling_tag: ${{ steps.version.outputs.rolling_tag }}
 
     concurrency:
       group: docker-${{ github.repository }}-${{ github.ref_name }}-${{ inputs.service_name }}
@@ -148,9 +144,7 @@ jobs:
           fi
           NEXT_VERSION=$(( ${LATEST:-0} + 1 ))
           VERSION_TAG="v${NEXT_VERSION}${SUFFIX}"
-          ROLLING_TAG=$([ -z "${SUFFIX}" ] && echo "latest" || echo "latest${SUFFIX}")
           echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
-          echo "rolling_tag=${ROLLING_TAG}" >> "$GITHUB_OUTPUT"
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           {
             echo "## Image tags — \`${{ inputs.service_name }}\`"
@@ -158,7 +152,6 @@ jobs:
             echo "| Kind | Tag |"
             echo "|------|-----|"
             echo "| **version** | \`${VERSION_TAG}\` |"
-            echo "| **rolling** | \`${ROLLING_TAG}\` |"
             echo "| **ECR** | \`${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -186,7 +179,6 @@ jobs:
           push: true
           tags: |
             ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
-            ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.rolling_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -201,7 +193,6 @@ jobs:
           push: true
           tags: |
             ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
-            ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.rolling_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
