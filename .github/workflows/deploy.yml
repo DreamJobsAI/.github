@@ -26,10 +26,9 @@ on:
         required: true
         type: string
       image_tag:
-        description: "ECR tag to pin (e.g. v12-dev). Empty = stack rolling tag from .env"
-        required: false
+        description: "ECR image tag to deploy (e.g. v12-dev). Required."
+        required: true
         type: string
-        default: ""
       skip_if_instance_stopped:
         description: "If true, exit 0 with warning when EC2 is not running (push path)"
         required: false
@@ -142,51 +141,24 @@ jobs:
           ACCOUNT="${{ inputs.aws_account_id }}"
           INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
           IMAGE_TAG="${{ inputs.image_tag }}"
-          ECR_IMAGE="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/dreamjobs-ai/${SERVICE}"
           TAG_KEY=$(echo "${SERVICE}_TAG" | tr 'a-z-' 'A-Z_')
           CONTAINER="${STACK_DIR}-${SERVICE}"
 
-          # Build remote script as a single bash -c payload (reliable quoting).
-          if [ -n "${IMAGE_TAG}" ]; then
-            REMOTE=$(cat <<EOF
+          REMOTE=$(cat <<EOF
           set -euo pipefail
-          echo "=== Deploying ${SERVICE} → ${ENV_NAME} (stack=${STACK_DIR} tag=${IMAGE_TAG}) ==="
+          echo "=== Deploying ${SERVICE} → ${ENV_NAME} (tag=${IMAGE_TAG}) ==="
           aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com
           cd /opt/dreamjobs-ai/${STACK_DIR}
-          OVERRIDE="/tmp/dj-override-${SERVICE}-${STACK_DIR}.yml"
-          printf '%s\n' 'services:' '  ${SERVICE}:' '    image: ${ECR_IMAGE}:${IMAGE_TAG}' > "\${OVERRIDE}"
-          docker compose -f docker-compose.yml -f "\${OVERRIDE}" pull ${SERVICE}
-          docker compose -f docker-compose.yml -f "\${OVERRIDE}" up -d --no-deps --force-recreate ${SERVICE}
-          rm -f "\${OVERRIDE}"
-          touch deployed-tags.env
-          TAGS_TMP=\$(mktemp /tmp/dj-tags-XXXXXX)
-          grep -v '^${TAG_KEY}=' deployed-tags.env > "\${TAGS_TMP}" || true
-          echo '${TAG_KEY}=${IMAGE_TAG}' >> "\${TAGS_TMP}"
-          mv "\${TAGS_TMP}" deployed-tags.env
-          DEADLINE=\$((SECONDS+120))
-          while :; do
-            H=\$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ${CONTAINER} 2>/dev/null || echo missing)
-            echo "health=\$H"
-            [ "\$H" = "healthy" ] || [ "\$H" = "none" ] && break
-            [ \$SECONDS -ge \$DEADLINE ] && { docker logs --tail 40 ${CONTAINER} || true; exit 1; }
-            sleep 5
-          done
-          echo "=== Deploy complete ==="
-          docker ps --filter name=${CONTAINER} --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-          echo "=== Cleaning old images ==="
-          docker images --format '{{.Repository}}:{{.Tag}}' | grep "dreamjobs-ai/${SERVICE}:" | grep -v ":${IMAGE_TAG}\$" | xargs -r docker rmi 2>/dev/null || true
-          docker image prune -f 2>/dev/null || true
-          echo "=== Cleanup done ==="
-          EOF
-          )
+          # Pin this service's image tag in .env
+          if grep -q "^${TAG_KEY}=" .env 2>/dev/null; then
+            sed -i "s|^${TAG_KEY}=.*|${TAG_KEY}=${IMAGE_TAG}|" .env
           else
-            REMOTE=$(cat <<EOF
-          set -euo pipefail
-          echo "=== Deploying ${SERVICE} → ${ENV_NAME} (stack=${STACK_DIR} rolling tag from .env) ==="
-          aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com
-          cd /opt/dreamjobs-ai/${STACK_DIR}
+            echo "${TAG_KEY}=${IMAGE_TAG}" >> .env
+          fi
+          # Pull and recreate only this service
           docker compose pull ${SERVICE}
-          docker compose up -d --no-deps ${SERVICE}
+          docker compose up -d --no-deps --force-recreate ${SERVICE}
+          # Wait for healthy (120s deadline)
           DEADLINE=\$((SECONDS+120))
           while :; do
             H=\$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ${CONTAINER} 2>/dev/null || echo missing)
@@ -197,23 +169,20 @@ jobs:
           done
           echo "=== Deploy complete ==="
           docker ps --filter name=${CONTAINER} --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-          echo "=== Cleaning old images ==="
-          docker images --format '{{.Repository}}:{{.Tag}}' | grep "dreamjobs-ai/${SERVICE}:" | xargs -r docker rmi 2>/dev/null || true
-          docker image prune -f 2>/dev/null || true
-          echo "=== Cleanup done ==="
+          # Cleanup: remove all images for this service except the deployed one
+          docker images --format '{{.Repository}}:{{.Tag}}' | grep "dreamjobs-ai/${SERVICE}:" | grep -v ":${IMAGE_TAG}\$" | xargs -r docker rmi 2>/dev/null || true
+          docker image prune -f >/dev/null 2>&1 || true
+          echo "=== Done ==="
           EOF
           )
-          fi
 
-          # One multiline shell script — AWS-RunShellScript executes each array
-          # entry with the instance shell; keep it as a single entry.
           PARAMS=$(jq -nc --arg script "$REMOTE" '{commands: [$script]}')
 
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
             --timeout-seconds 360 \
-            --comment "Deploy ${SERVICE} ${IMAGE_TAG:-rolling} to ${ENV_NAME} (run ${{ github.run_id }})" \
+            --comment "Deploy ${SERVICE} ${IMAGE_TAG} to ${ENV_NAME} (run ${{ github.run_id }})" \
             --parameters "${PARAMS}" \
             --query "Command.CommandId" \
             --output text)
@@ -283,7 +252,7 @@ jobs:
             echo "|-----------|-------|"
             echo "| **Service** | \`${{ inputs.service_name }}\` |"
             echo "| **Environment** | \`${{ inputs.environment }}\` |"
-            echo "| **Image tag** | \`${{ inputs.image_tag || '(rolling from .env)' }}\` |"
+            echo "| **Image tag** | \`${{ inputs.image_tag }}\` |"
             echo "| **Stack dir** | \`/opt/dreamjobs-ai/${{ steps.stack.outputs.stack_dir }}\` |"
             echo "| **Instance** | \`${{ secrets.EC2_INSTANCE_ID }}\` |"
             echo "| **Instance state** | \`${{ steps.instance.outputs.state || 'n/a' }}\` |"
