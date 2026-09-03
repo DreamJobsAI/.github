@@ -156,7 +156,11 @@ jobs:
           # container still uses the old one. This replaces the previous fragile
           # `grep secrets out of the existing .env` approach that broke whenever the
           # .env was in a transient state.
-          /opt/dreamjobs-ai/bin/bootstrap-env.sh ${ENV_NAME}
+          #
+          # NOTE: use STACK_DIR (dev|staging|prod), not ENV_NAME. The GitHub
+          # Environment name is "production" but the bootstrap accepts only
+          # "prod" — that's the same case-fold we did in step 1.
+          /opt/dreamjobs-ai/bin/bootstrap-env.sh ${STACK_DIR}
 
           # --- 2. Pin this service's image tag ---
           if grep -q "^${TAG_KEY}=" .env 2>/dev/null; then
