@@ -144,7 +144,9 @@ jobs:
           fi
           NEXT_VERSION=$(( ${LATEST:-0} + 1 ))
           VERSION_TAG="v${NEXT_VERSION}${SUFFIX}"
+          ROLLING_TAG="latest${SUFFIX}"
           echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
+          echo "rolling_tag=${ROLLING_TAG}" >> "$GITHUB_OUTPUT"
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           {
             echo "## Image tags — \`${{ inputs.service_name }}\`"
@@ -152,6 +154,7 @@ jobs:
             echo "| Kind | Tag |"
             echo "|------|-----|"
             echo "| **version** | \`${VERSION_TAG}\` |"
+            echo "| **rolling** | \`${ROLLING_TAG}\` |"
             echo "| **ECR** | \`${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -179,6 +182,7 @@ jobs:
           push: true
           tags: |
             ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
+            ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.rolling_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -193,6 +197,7 @@ jobs:
           push: true
           tags: |
             ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.version_tag }}
+            ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.ecr_repository }}:${{ steps.version.outputs.rolling_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
