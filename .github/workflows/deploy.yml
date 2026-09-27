@@ -183,6 +183,12 @@ jobs:
             [ \$SECONDS -ge \$DEADLINE ] && { docker logs --tail 40 ${CONTAINER} || true; exit 1; }
             sleep 5
           done
+          # --- 4b. Verify the requested image is what runs and what .env pins ---
+          # A concurrent bootstrap on the same host can rewrite .env and recreate with the old tag.
+          RUNNING_TAG=\$(docker inspect --format '{{.Config.Image}}' ${CONTAINER} | sed 's/.*://')
+          PINNED_TAG=\$(sed -n "s/^${TAG_KEY}=//p" .env)
+          echo "running_tag=\$RUNNING_TAG pinned_tag=\$PINNED_TAG expected=${IMAGE_TAG}"
+          [ "\$RUNNING_TAG" = "${IMAGE_TAG}" ] && [ "\$PINNED_TAG" = "${IMAGE_TAG}" ] || { echo "ERROR: ${SERVICE} is not running/pinned at ${IMAGE_TAG}"; exit 1; }
           echo "=== Deploy complete ==="
           docker ps --filter name=${CONTAINER} --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
 
