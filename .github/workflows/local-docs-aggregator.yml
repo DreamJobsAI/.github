@@ -10,7 +10,7 @@
 #   name: Local Docs Aggregator
 #   on:
 #     push:
-#       branches: [main]
+#       branches: [dev]   # dev is the source of truth; README flows dev → staging → main
 #       paths: ['docs/**']
 #     workflow_dispatch:
 #   jobs:
